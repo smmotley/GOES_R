@@ -656,7 +656,7 @@ def fire_group(fire_ll, DATE, xres, FILE, max_group_id):
             fire_group_num += 1
 
     # Now that we have grouped our fire points into fires, we want to see if CAL Fire has already
-    # declared any of these as active fires. The idea here is to download their fire data via csv (no api as of yet),
+    # declared any of these as active fires. The idea here is to download the fire data via csv (no api as of yet),
     # and test whether any of the points detected on the GOES-R are associated with a fire already identified by CAL
     # fire. If so, our fire points will now be given that fire ID, which will act the foreign key to each sql table.
     # So, first we have to check if any of our fires are within a certain range of all the fires listed. If not,
