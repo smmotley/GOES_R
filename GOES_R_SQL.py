@@ -66,6 +66,7 @@ def create_goes_r_image_table():
               "fire_temp_image BLOB,"
               "fire_temp_gif BLOB, "
               "s3_filename TEXT,"
+              "fire_id TEXT,"
               "FOREIGN KEY (scan_dt) REFERENCES create_user_table(scan_dt))")
 
 

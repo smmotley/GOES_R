@@ -67,6 +67,9 @@ class AwsGOES(object):
                     scanMode = f"{scanMode}C{self.bands[0]:02}"
             prefix = f"{product}/{date_of_hr.year}/{doy}/{date_of_hr.hour:02}/OR_{product}-{scanMode}_G{goesNum}_"  # Multi Band
             objs = bucket.objects.filter(Prefix=prefix)
+            #for ob in objs:
+                #print(ob)
+
             file_paths.extend([o.key for o in objs])
         file_paths.sort(key=lambda x:x.split("_c")[1])
         return file_paths

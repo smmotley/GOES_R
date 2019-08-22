@@ -3,7 +3,7 @@ from pyproj import Proj, Geod, transform
 from functools import partial
 from datetime import datetime, timedelta
 import sqlite3
-import os, io, time
+import os, io, time, sys
 import pandas as pd
 import boto3
 import numpy as np
@@ -72,6 +72,9 @@ def main():
     CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
     CURSOR = CONN.cursor()
     # first_scan = "07/22/2019 23:00"     # Use for debugging.
+    forced_mp4 = False   # Set to True if you want to force program to create an mp4 at a given lngLat
+    forced_mp4_lnglat = (-122.24194399, 40.715556)
+
 
     # Analise only the most recent file in the S3 bucket.
     most_recent_scan = False
@@ -101,6 +104,33 @@ def main():
                     hrs=hours_of_data)
 
     goes_multiband_files = goes_multiband.bucket_files
+
+    if forced_mp4:
+        # The time of the last scan
+        starting_time = datetime.utcnow().strftime("%m/%d/%Y %H:%M")
+        forced_loop_creator(goes_multiband, forced_mp4_lnglat, bucket, s3, starting_time, hours_of_data=2)
+        sys.exit() # Stop program
+
+    # Given the situation where the GOES-17 data are delayed and remain delayed for several hours (or days)
+    # this will -- at the very least -- allow for alerts to continue if the data are no more than 3 hours old.
+    # This will check if the list is empty, which indicates no GOES-17 files have been generated in the last hour.
+    if not goes_multiband_files:
+        print("GOES SCAN DATA APPEARS TO BE DELAYED")
+        hours_of_data = 3
+        goes_multiband = AwsGOES(
+            bands=[7, 8],
+            bucket=bucket,
+            st_dt=first_scan,
+            hrs=hours_of_data)
+        try:
+            lastf_time = datetime.strptime(((goes_multiband.bucket_files[-1])
+                                            .split("_c")[1])
+                                            .replace('.nc',""),"%Y%j%H%M%S%f")
+            print(f"GOES DATA IS DELAYED, LATEST FILE IS: {abs(lastf_time - datetime.utcnow()).seconds / (60*60)} "
+                  f" hours old." )
+        except Exception as e:
+            (print(f"Last GOES-17 Scan is more than 3 hours old...{e}"))
+
     if most_recent_scan:
         goes_multiband_files = [goes_multiband.bucket_files[-1]]
 
@@ -166,8 +196,14 @@ def main():
             CURSOR.execute(sql)
             map_lnglat = [item for item in list(CURSOR.fetchall())]
 
+            sql = '''SELECT alerted_incident_id, alerted_cal_fire_incident_id 
+                    FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
+            CURSOR.execute(sql)
+            fire_id = [item[0] for item in list(CURSOR.fetchall()) if item][-1]
+
             # If the file isn't in our database yet, go download it.
-            for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
+            #for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
+            for mp4_file in mp4_files:
                 # Download multiband netcdf file
                 C = goes_multiband.download_file(mp4_file, goes_multiband.bucket, s3)     # NETCDF File containing multiband GOES data
 
@@ -187,10 +223,52 @@ def main():
                                            str(scan_diff) + " minutes.")
 
                 # Create a true color image and store the png file in the database.
-                goes_firetemp_img(C, map_lnglat, mp4_file, False)
-            alert_user(new_fires, 1, fdfc_DATE)
+                goes_firetemp_img(C, map_lnglat, mp4_file, fire_id, False)
+            alert_user(new_fires, 1, fdfc_DATE, fire_id)
     print("COMPLETE!")
     CONN.close()
+    return
+
+
+def forced_loop_creator(goes_multiband, center_lnglat, bucket, s3, starting_time, hours_of_data):
+    """
+
+    :param goes_multiband: The multiband file object
+    :param center_lnglat:  The longitude, latitude point of interest (center point of image).
+    :param bucket:         Passing s3 bucket name
+    :param s3:             For boto3
+    :param hours_of_data:  The duration of the mp4 loop in hours.
+    :param starting_time:  The time of the last scan.
+    :return:
+    """
+    fire_id = -999       # Flag these image files to be deleted from the database.
+    CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
+    CURSOR = CONN.cursor()
+    print("Forced Creation of MP4...")
+
+    # To create an mp4 loop that is "hours_of_data" in length, we first need to get all the file names
+    # of the multiband files.
+    mp4_files = AwsGOES(
+        bands=[7, 8],
+        bucket=bucket,
+        st_dt=starting_time,
+        hrs=hours_of_data).bucket_files
+
+    map_lnglat = [center_lnglat]
+
+    # If the file isn't in our database yet, go download it.
+    # for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
+    for mp4_file in mp4_files:
+        # Download multiband netcdf file
+        C = goes_multiband.download_file(mp4_file, goes_multiband.bucket,
+                                         s3)  # NETCDF File containing multiband GOES data
+
+        # Create a true color image and store the png file in the database.
+        goes_firetemp_img(C, map_lnglat, mp4_file, fire_id, False)
+    create_mp4(CONN,datetime.utcnow(), fire_id, hours_of_data)
+    sql = "DELETE from main.goes_r_images WHERE fire_id = ?"
+    CURSOR.execute(sql, [fire_id])
+    CONN.commit()
     return
 
 
@@ -462,7 +540,7 @@ def fire_pixels(C):
     return ca_fire_pts, xres, yres
 
 
-def goes_firetemp_img(C, ca_fire_latlng, FILE, only_RGB=False):
+def goes_firetemp_img(C, ca_fire_latlng, FILE, fire_id, only_RGB=False):
     composite_img = Fire_Image(C=C, fileName=FILE).Composite
 
     # Scan's start time, converted to datetime object
@@ -492,14 +570,15 @@ def goes_firetemp_img(C, ca_fire_latlng, FILE, only_RGB=False):
     XX, YY = np.meshgrid(x, y)
     lons, lats = p(XX, YY, inverse=True)
 
-    # Location of California
-    l = {'latitude': 37.75,
-         'longitude': -120.5}
+
+    # Location of latest firepoint
+    l = {'latitude': ca_fire_latlng[-1][1],
+         'longitude': ca_fire_latlng[-1][0]}
 
     # Draw zoomed map
-    m = Basemap(resolution='i', projection='cyl', area_thresh=50000, llcrnrlon=l['longitude'] - 5,
-                llcrnrlat=l['latitude'] - 5,
-                urcrnrlon=l['longitude'] + 5, urcrnrlat=l['latitude'] + 5, )
+    m = Basemap(resolution='i', projection='cyl', area_thresh=50000, llcrnrlon=l['longitude'] - 2,
+                llcrnrlat=l['latitude'] - 2,
+                urcrnrlon=l['longitude'] + 2, urcrnrlat=l['latitude'] + 2, )
 
     # We need an array the shape of the data, so use R. The color of each pixel will be set by color=colorTuple.
     #newmap = m.pcolormesh(lons, lats, R, color=colorTuple, linewidth=0, latlon=True)
@@ -523,9 +602,9 @@ def goes_firetemp_img(C, ca_fire_latlng, FILE, only_RGB=False):
     plt.title('GOES-17 Fire Detection', loc='left', fontweight='semibold', fontsize=15)
     plt.title('%s' % scan_start.strftime('%d %B %Y %H:%M UTC'), loc='right');
 
-    m.drawcountries()
-    m.drawstates()
-    m.drawcounties(color='darkred')
+    m.drawcountries(color='white')
+    m.drawstates(color='white')
+    m.drawcounties(color='white', linewidth=0.5)
 
 
     # # Use the following code to place a blue dot in the center of a FIRE PIXEL.
@@ -538,7 +617,8 @@ def goes_firetemp_img(C, ca_fire_latlng, FILE, only_RGB=False):
 
     x2, y2 = m([i[0] for i in ca_fire_latlng], [i[1] for i in ca_fire_latlng])
     # PLACE RED DOT ON CENTER POINT OF OF VALID PIXEL
-    m.plot(x2, y2, 'ro', markersize=2)
+    #m.plot(x2, y2, 'ro', markersize=2)
+
     for x2, y2 in zip(x2,y2):
         fire_circle = Circle(xy=m(x2, y2), radius=0.2, fill=False, color='r', linewidth=2)
         plt.gca().add_patch(fire_circle)
@@ -550,8 +630,8 @@ def goes_firetemp_img(C, ca_fire_latlng, FILE, only_RGB=False):
 
     # Store image into database
     ablob = buf.getvalue()
-    sql = '''INSERT INTO goes_r_images (fire_temp_image, scan_dt, s3_filename) VALUES (?, ?, ?)'''
-    CONN.execute(sql, [ablob, DATE, FILE])
+    sql = '''INSERT INTO goes_r_images (fire_temp_image, scan_dt, s3_filename, fire_id) VALUES (?, ?, ?, ?)'''
+    CONN.execute(sql, [ablob, DATE, FILE, fire_id])
     CONN.commit()
     buf.close()
 
@@ -711,7 +791,7 @@ def fire_group(fire_ll, DATE, xres, FILE, max_group_id):
     df.to_sql('goes_r_fire', CONN, index=False, if_exists='replace')
     return df
 
-def alert_user(alert_num, userID, st_time):
+def alert_user(alert_num, userID, st_time, fire_id):
     sql = "SELECT * FROM user_alert_log WHERE user_id = ?"
     df = pd.read_sql(sql, CONN, params=[userID])
     email_text = f"A total of {alert_num} new incidents have been reported. \n \n"
@@ -751,7 +831,7 @@ def alert_user(alert_num, userID, st_time):
         CURSOR.execute(sql_update, [str(userID)])
         CONN.commit()
 
-    create_mp4(CONN, st_time)
+    create_mp4(CONN, st_time, fire_id, loop_hours=1)
     sql = "SELECT fire_temp_gif, MAX(scan_dt) FROM goes_r_images WHERE fire_temp_gif NOT NULL"
     CURSOR.execute(sql)
     ablob = CURSOR.fetchone()
@@ -774,12 +854,12 @@ def extract_gif(scan_time):
         output_file.write(ablob[0])
     return filename
 
-def create_mp4(conn, scan_time):
+def create_mp4(conn, scan_time, fire_id, loop_hours):
     frames = []
     cursor = conn.cursor()
-    one_hour = scan_time - timedelta(hours=1)
-    sql = "SELECT scan_dt FROM goes_r_images WHERE scan_dt <= ? AND scan_dt >= ?"
-    cursor.execute(sql, [scan_time, one_hour])
+    one_hour = scan_time - timedelta(hours=loop_hours)
+    sql = "SELECT scan_dt FROM goes_r_images WHERE scan_dt <= ? AND scan_dt >= ? AND fire_id = ?"
+    cursor.execute(sql, [scan_time, one_hour, fire_id])
     timestamps = list(cursor.fetchall())
     for imgtime in timestamps:
         sql = "SELECT fire_temp_image FROM goes_r_images WHERE scan_dt = ?"
