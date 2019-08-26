@@ -192,14 +192,14 @@ def main():
                     st_dt=fdfc_DATE.strftime("%m/%d/%Y %H:%M"),
                     hrs=hours_of_data).bucket_files
 
-            sql = '''SELECT fire_lng, fire_lat FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
+            sql = '''SELECT fire_lng, fire_lat, alerted_incident_id, alerted_cal_fire_incident_id 
+             FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
             CURSOR.execute(sql)
-            map_lnglat = [item for item in list(CURSOR.fetchall())]
-
-            sql = '''SELECT alerted_incident_id, alerted_cal_fire_incident_id 
-                    FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
-            CURSOR.execute(sql)
-            fire_id = [item[0] for item in list(CURSOR.fetchall()) if item][-1]
+            resp = list(CURSOR.fetchall())
+            map_lnglat = [item[0:2] for item in resp]
+            fire_id = [item[2] for item in resp if item[2]][-1]
+            if not fire_id:
+                fire_id = [item[3] for item in resp if item][-1]
 
             # If the file isn't in our database yet, go download it.
             #for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
@@ -869,13 +869,13 @@ def create_mp4(conn, scan_time, fire_id, loop_hours):
         frames.append(img)
     try:
         imageio.mimwrite('fire_cur.mp4', frames, fps=5)
+        with open('fire_cur.mp4', 'rb') as gif:
+            ablob = gif.read()
+            sql = '''UPDATE goes_r_images SET fire_temp_gif = ? WHERE scan_dt = ?'''
+            cursor.execute(sql, [sqlite3.Binary(ablob), timestamps[-1][0]])
+            conn.commit()
     except:
         print("NO IMAGES TO PROCESS.")
-    with open('fire_cur.mp4', 'rb') as gif:
-        ablob = gif.read()
-        sql = '''UPDATE goes_r_images SET fire_temp_gif = ? WHERE scan_dt = ?'''
-        cursor.execute(sql, [sqlite3.Binary(ablob), timestamps[-1][0]])
-        conn.commit()
     return
 
 
