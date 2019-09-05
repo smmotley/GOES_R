@@ -180,8 +180,19 @@ def main():
 
         if new_fires > 0:
             print("New Fire Detected, Setting up alert...")
+
+            # Info needed for a new fire includes the fire's location and incident id number (either our id or CA_fire)
+            sql = '''SELECT fire_lng, fire_lat, alerted_incident_id, alerted_cal_fire_incident_id 
+                         FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
+            CURSOR.execute(sql)
+            resp = list(CURSOR.fetchall())
+            map_lnglat = [item[0:2] for item in resp]
+            fire_id = [item[2] for item in resp if item][-1]
+            if not fire_id:
+                fire_id = [item[3] for item in resp if item][-1]
+
             # A list of files already downloaded into the database and processed into .png images.
-            CURSOR.execute("SELECT s3_filename FROM goes_r_images")
+            CURSOR.execute("SELECT s3_filename FROM goes_r_images WHERE fire_id = ?", [fire_id])
             already_downloaded = [item[0] for item in list(CURSOR.fetchall())]
 
             # To create an mp4 loop that is "hours_of_data" in length, we first need to get all the file names
@@ -192,18 +203,9 @@ def main():
                     st_dt=fdfc_DATE.strftime("%m/%d/%Y %H:%M"),
                     hrs=hours_of_data).bucket_files
 
-            sql = '''SELECT fire_lng, fire_lat, alerted_incident_id, alerted_cal_fire_incident_id 
-             FROM user_alert_log WHERE user_id = 1 AND need_to_alert = 1'''
-            CURSOR.execute(sql)
-            resp = list(CURSOR.fetchall())
-            map_lnglat = [item[0:2] for item in resp]
-            fire_id = [item[2] for item in resp if item[2]][-1]
-            if not fire_id:
-                fire_id = [item[3] for item in resp if item][-1]
-
             # If the file isn't in our database yet, go download it.
-            #for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
-            for mp4_file in mp4_files:
+            for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
+            #for mp4_file in mp4_files:
                 # Download multiband netcdf file
                 C = goes_multiband.download_file(mp4_file, goes_multiband.bucket, s3)     # NETCDF File containing multiband GOES data
 
@@ -225,50 +227,10 @@ def main():
                 # Create a true color image and store the png file in the database.
                 goes_firetemp_img(C, map_lnglat, mp4_file, fire_id, False)
             alert_user(new_fires, 1, fdfc_DATE, fire_id)
+        else:
+            print("No New Fires Found For: " + fdfc_DATE.strftime("%m/%d/%Y %H:%M"))
     print("COMPLETE!")
     CONN.close()
-    return
-
-
-def forced_loop_creator(goes_multiband, center_lnglat, bucket, s3, starting_time, hours_of_data):
-    """
-
-    :param goes_multiband: The multiband file object
-    :param center_lnglat:  The longitude, latitude point of interest (center point of image).
-    :param bucket:         Passing s3 bucket name
-    :param s3:             For boto3
-    :param hours_of_data:  The duration of the mp4 loop in hours.
-    :param starting_time:  The time of the last scan.
-    :return:
-    """
-    fire_id = -999       # Flag these image files to be deleted from the database.
-    CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
-    CURSOR = CONN.cursor()
-    print("Forced Creation of MP4...")
-
-    # To create an mp4 loop that is "hours_of_data" in length, we first need to get all the file names
-    # of the multiband files.
-    mp4_files = AwsGOES(
-        bands=[7, 8],
-        bucket=bucket,
-        st_dt=starting_time,
-        hrs=hours_of_data).bucket_files
-
-    map_lnglat = [center_lnglat]
-
-    # If the file isn't in our database yet, go download it.
-    # for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
-    for mp4_file in mp4_files:
-        # Download multiband netcdf file
-        C = goes_multiband.download_file(mp4_file, goes_multiband.bucket,
-                                         s3)  # NETCDF File containing multiband GOES data
-
-        # Create a true color image and store the png file in the database.
-        goes_firetemp_img(C, map_lnglat, mp4_file, fire_id, False)
-    create_mp4(CONN,datetime.utcnow(), fire_id, hours_of_data)
-    sql = "DELETE from main.goes_r_images WHERE fire_id = ?"
-    CURSOR.execute(sql, [fire_id])
-    CONN.commit()
     return
 
 
@@ -836,7 +798,8 @@ def alert_user(alert_num, userID, st_time, fire_id):
     CURSOR.execute(sql)
     ablob = CURSOR.fetchone()
     filename = 'fire_latest.mp4'
-    with open(filename, 'wb') as output_file:
+    fpath = os.path.join(os.path.dirname(os.path.realpath(__file__)),filename)
+    with open(fpath, 'wb') as output_file:
         output_file.write(ablob[0])
         print("SENDING EMAIL...")
         mailer.send_mail(filename, email_text)
@@ -845,11 +808,12 @@ def alert_user(alert_num, userID, st_time, fire_id):
 
 
 def extract_gif(scan_time):
-    sql = "SELECT fire_temp_gif FROM goes_r_images WHERE scan_dt = ? AND fire_temp_gif NOT NULL"
+    #sql = "SELECT fire_temp_gif FROM goes_r_images WHERE scan_dt = ? AND fire_temp_gif NOT NULL"
+    sql = "SELECT fire_temp_image FROM goes_r_images WHERE scan_dt = ? AND fire_temp_image NOT NULL"
     #param = {'scan_dt': scan_time}
     CURSOR.execute(sql, [scan_time])
     ablob = CURSOR.fetchone()
-    filename = 'test.mp4'
+    filename = 'test.png'
     with open(filename, 'wb') as output_file:
         output_file.write(ablob[0])
     return filename
@@ -861,15 +825,17 @@ def create_mp4(conn, scan_time, fire_id, loop_hours):
     sql = "SELECT scan_dt FROM goes_r_images WHERE scan_dt <= ? AND scan_dt >= ? AND fire_id = ?"
     cursor.execute(sql, [scan_time, one_hour, fire_id])
     timestamps = list(cursor.fetchall())
+    fname = 'fire_cur.mp4'
+    fpath = os.path.join(os.path.dirname(os.path.realpath(__file__)), fname)
     for imgtime in timestamps:
-        sql = "SELECT fire_temp_image FROM goes_r_images WHERE scan_dt = ?"
-        cursor.execute(sql, imgtime)
+        sql = "SELECT fire_temp_image FROM goes_r_images WHERE scan_dt = ? AND fire_id = ?"
+        cursor.execute(sql, [imgtime[0], fire_id])
         imgFile = cursor.fetchone()
         img = Image.open(io.BytesIO(imgFile[0]))
         frames.append(img)
     try:
-        imageio.mimwrite('fire_cur.mp4', frames, fps=5)
-        with open('fire_cur.mp4', 'rb') as gif:
+        imageio.mimwrite(fpath, frames, fps=5)
+        with open(fpath, 'rb') as gif:
             ablob = gif.read()
             sql = '''UPDATE goes_r_images SET fire_temp_gif = ? WHERE scan_dt = ?'''
             cursor.execute(sql, [sqlite3.Binary(ablob), timestamps[-1][0]])
@@ -905,20 +871,21 @@ def update_alertDB(loop_duration, user_email):
     # User ID number
     userID = respUsers[0][2]
 
-    # Test if GOES detected any hotspots within range of user
+    # Did GOES detect any hotspots within range of user
     for pt in respGoesF:
         ll = Point(pt[:-1])  # Lat lng of point
         fire_id = pt[2]  # ID given to fire
 
         geod = Geod(ellps='WGS84')
-        angle1, angle2, dist = geod.inv(ll.x, ll.y, userll.x, userll.y)  # Distance of user to fire
+        angle1, angle2, dist = geod.inv(ll.x, ll.y, userll.x, userll.y)  # Distance of user to fire in meters
 
         sql = "SELECT need_to_alert FROM user_alert_log WHERE user_id = ? AND alerted_incident_id = ?"  # Check user has been alerted to this ID
         CURSOR.execute(sql, [userID, fire_id])
         already_alerted = CURSOR.fetchone()  # This will be None if not alerted yet.
 
-        # If dist is < 1000 km add this point to the user_alert_log and set need_to_alert value to True
-        if dist < (1000 * 1000) and not already_alerted:
+        # 1 m = 0.00062 miles
+        # If dist is < 100 miles add this point to the user_alert_log and set need_to_alert value to True
+        if (dist*0.00062) < 100 and not already_alerted:
             sql = '''INSERT INTO user_alert_log 
                         (user_id, alerted_incident_id, alert_time, need_to_alert, dist_to_fire, fire_lng, fire_lat) 
                         VALUES (?, ?, ?, ?, ?, ?, ?)'''
@@ -941,6 +908,7 @@ def update_alertDB(loop_duration, user_email):
         # Distance
         geod = Geod(ellps='WGS84')
         angle1, angle2, dist = geod.inv(ll.x, ll.y, userll.x, userll.y)
+        # Alert to any cal fire
         if dist < 100000000 and not already_alerted:
             sql = '''INSERT INTO user_alert_log 
                         (user_id, alerted_cal_fire_incident_id, alert_time, 
@@ -956,6 +924,49 @@ def update_alertDB(loop_duration, user_email):
     CURSOR.execute(sql_alert_count, [userID])
     alert_num = list(CURSOR.fetchone())[0]
     return alert_num
+
+
+def forced_loop_creator(goes_multiband, center_lnglat, bucket, s3, starting_time, hours_of_data):
+    """
+
+    :param goes_multiband: The multiband file object
+    :param center_lnglat:  The longitude, latitude point of interest (center point of image).
+    :param bucket:         Passing s3 bucket name
+    :param s3:             For boto3
+    :param hours_of_data:  The duration of the mp4 loop in hours.
+    :param starting_time:  The time of the last scan.
+    :return:
+    """
+    fire_id = -999       # Flag these image files to be deleted from the database.
+    CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
+    CURSOR = CONN.cursor()
+    print("Forced Creation of MP4...")
+
+    # To create an mp4 loop that is "hours_of_data" in length, we first need to get all the file names
+    # of the multiband files.
+    mp4_files = AwsGOES(
+        bands=[7, 8],
+        bucket=bucket,
+        st_dt=starting_time,
+        hrs=hours_of_data).bucket_files
+
+    map_lnglat = [center_lnglat]
+
+    # If the file isn't in our database yet, go download it.
+    # for mp4_file in (mp4_file for mp4_file in mp4_files if mp4_file not in already_downloaded):
+    for mp4_file in mp4_files:
+        # Download multiband netcdf file
+        C = goes_multiband.download_file(mp4_file, goes_multiband.bucket,
+                                         s3)  # NETCDF File containing multiband GOES data
+
+        # Create a true color image and store the png file in the database.
+        goes_firetemp_img(C, map_lnglat, mp4_file, fire_id, False)
+    create_mp4(CONN,datetime.utcnow(), fire_id, hours_of_data)
+    sql = "DELETE from main.goes_r_images WHERE fire_id = ?"
+    CURSOR.execute(sql, [fire_id])
+    CONN.commit()
+    return
+
 
 def append_db(data, conn):
     try:
