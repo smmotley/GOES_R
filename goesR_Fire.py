@@ -60,13 +60,14 @@ def main():
                 ii) if not, give it an arbitrary ID.
             c) Store the lat/lng, fire ID, and time of scan into the database.
         4) If active fire points were found, create an image for that scan and save it in the database.
-        5) TODO: Alert user that a new fire has been found based on user's preferences (e.g. proximity to fire)
+        5) Alert user that a new fire has been found based on user's preferences (e.g. proximity to fire)
             a) Send text / email with:
                 i) Link to CalFire's incident page for the fire (contained in csv that is downloaded)
                 ii) gif loop of the last 2 hours of data from the GOES satellite.
                 iii) Fire info relative to user (distance to fire, fire spread rate, etc)
-        TODO: Future: Determine frequency of scans based on fire risk, where fire risk is based on SPC fire outlook,
+        TODO: Future: 1) Determine frequency of scans based on fire risk, where fire risk is based on SPC fire outlook,
                       redflag warnings, fire watches, or model output (e.g. wind gusts / low humidity).
+                      2) Allow user to select update about a specific fire they were alerted to.
     :return:
     """
     CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
