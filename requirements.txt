@@ -4,7 +4,7 @@ boto3==1.9.193
 botocore==1.12.193
 CacheControl==0.12.5
 Cartopy==0.17.0
-certifi==2019.6.16
+certifi==2022.12.7
 cffi==1.12.3
 cftime==1.0.3.4
 chardet==3.0.4
